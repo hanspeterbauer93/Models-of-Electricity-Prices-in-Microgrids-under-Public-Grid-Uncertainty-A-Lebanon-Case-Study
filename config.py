@@ -21,19 +21,40 @@ CONFIG = {
     "CAP": {"PV": 0, "DG": 400}, # [kW] generation capacity limits for PV and diesel genset (e.g., based on existing assets or budget constraints)
 
     # Costs
-    "c_OV": {"PV": 0.01, "DG": 0.05},  # [$/(kWh)] operation and maintenance costs
-    "C_fuel_L": 1.50,  # [$/(L)] fuel cost
-    "alpha_fuel": 0.3,  # [L/kWh] fuel consumption rate for diesel generator (e.g., liters per kWh generated)
+    # Diesel: Bou Gebrael, Olleik & Zwickl-Bernhard (2026), Applied Energy 426,
+    # 128703 -- Table 7 (non-fuel variable Opex 0.014 $/kWh, fuel-related
+    # variable Opex 0.21 $/kWh) and its input workbook (diesel 0.80 $/L; heat
+    # rate 0.348 / 0.268 / 0.246 L/kWh on the 0-30 / 30-60 / 60-100% load
+    # segments). alpha_fuel = 0.21 / 0.80 is the constant heat rate that
+    # reproduces their fuel cost per kWh. Svolba (2025) reports the same price,
+    # 0.81 $/L in Aug 2024 (IPT Group fuel prices). Marginal diesel cost:
+    # 0.80 * 0.2625 + 0.014 = 0.224 $/kWh (earlier, unsourced: 0.50).
+    "c_OV": {"PV": 0.01, "DG": 0.014},  # [$/(kWh)] non-fuel variable O&M costs
+    "C_fuel_L": 0.80,  # [$/(L)] diesel price
+    "alpha_fuel": 0.2625,  # [L/kWh] specific fuel consumption (constant heat rate)
+
+    # Diesel heat-rate model:
+    #   "constant"  every kWh at alpha_fuel
+    #   "two_step"  Svolba (2025), Sec. 2.2.4: the WHOLE hour's output at
+    #               L_per_kWh[0] if the genset runs at <= threshold of its
+    #               capacity, at L_per_kWh[1] above it (one binary per hour and
+    #               scenario, upper level only). Note the step is on the whole
+    #               output, so just above the threshold costs less fuel in total
+    #               than just below it -- with PV the leader may curtail PV to
+    #               cross it.
+    "heat_rate": "constant",
+    "heat_rate_two_step": {"threshold": 0.25, "L_per_kWh": (0.35, 0.25)},
     "C_pen": 5.0,  # [$/(kWh)] penalty cost for load shedding (value of lost load)
 
     # Prices
     # -----------------------------------------------------------------------
     # P_ref is the ELASTICITY ANCHOR, not a price the MGO charges -- the MGO's
     # price p is an OUTCOME. It does three jobs in :mod:`run`: it anchors the
-    # demand response (q^supp = alpha_1 * p/P_ref * Rbar), it sets the price cap
+    # demand response (q^supp = alpha_1 * (p-P_ref)/P_ref * Rbar), it sets the price cap
     # Phat = phat_factor * P_ref, and it spans the price menu Pi. It is
-    # therefore inseparable from alpha_1, which IS the suppression share AT
-    # P_ref -- so a single alpha_1 admits only a single P_ref.
+    # therefore inseparable from alpha_1: p = P_ref reproduces the observed demand
+    # and alpha_1 is the suppression share per unit of relative markup over it
+    # -- so a single alpha_1 admits only a single P_ref.
     #
     # Source: Zwickl-Bernhard, S., Neumann, A. F., Olleik, M., & Dbouk, H.
     # (2025), "Market Organization in Low-Income Countries' Microgrids: Insights
@@ -67,7 +88,10 @@ CONFIG = {
     # :mod:`scenarios`, which is the same argument applied to EDL availability.
     # -----------------------------------------------------------------------
     "P_ref": 0.4031,  # [$/(kWh)] elasticity anchor; season-independent
-    "P_EDL": 0.1,  # [$/(kWh)] price for grid-supplied electricity (e.g., utility tariff)
+    # EDL residential tariff since the 2023 reform (billed from Feb 2023): 0.10
+    # $/kWh for the first 100 kWh/month, 0.27 above (later 0.26). L'Orient
+    # Today, "EDL to issue new tariffs in February 2023" (article 1318304).
+    "P_EDL": 0.27,  # [$/(kWh)] price for grid-supplied electricity, upper tariff block
 
     # Demand
     # Which demand response the lower level uses. Suppression applies to the
@@ -77,20 +101,19 @@ CONFIG = {
     #   "level"     q^supp = alpha_1 * p/P_ref * R        choke at 1/alpha_1
     #                                                     (= 2.09) -> cap 2.0
     #   "deviation" q^supp = alpha_1 * (p-P_ref)/P_ref * R  choke at 1 + 1/alpha_1
-    #                                                     (= 3.09) -> cap 3.0
+    #                                                     (= 3.09) -> cap 2.5
     # The choke prices are unchanged from a response tied to D: the factor
     # multiplying the load is the same, only the load it acts on has shrunk.
-    "demand_response": "level",
+    "demand_response": "deviation",
 
-    "alpha_1": 0.4788,    # [-] demand response to the price LEVEL:
-                          #     q^supp_t,s = alpha_1 * p_t/P_ref * R_t,s
-                          #     Note alpha_1 * R is ALREADY suppressed at the
-                          #     reference tariff itself (47.9% of the uncovered
-                          #     load), and that load is choked off entirely at
-                          #     p = P_ref/alpha_1
-                          #     (= 2.09 x P_ref). Implies an own-price elasticity
-                          #     of -alpha_1/(1-alpha_1) = -0.92 at the reference
-                          #     tariff -- near unit-elastic, hence a large markup.
+    "alpha_1": 0.4788,    # [-] demand response to the price DEVIATION from P_ref:
+                          #     q^supp_t,s = alpha_1 * (p_t-P_ref)/P_ref * R_t,s
+                          #     Nothing is suppressed at the reference tariff
+                          #     itself; each 1% markup over it suppresses
+                          #     alpha_1 % of the uncovered load, which is choked
+                          #     off entirely at p = (1 + 1/alpha_1) * P_ref
+                          #     (= 3.09 x P_ref). Own-price elasticity at P_ref
+                          #     is -alpha_1 = -0.48.
     "n_Households_nonPV": 400, # [-] number of households without PV (for demand scaling)
     "n_Households_PV": 250,     # [-] number of households with PV (for demand scaling)
     "cap_PV_per_HH": 4,        # [kWp] PV capacity per household (for demand scaling)
@@ -114,27 +137,31 @@ CONFIG = {
     #
     # The level only has to separate "no reason to shift" from the reasons that
     # are real, so it sits orders of magnitude below both: 0.001 against a
-    # price-menu step of 0.0063 $/kWh, and against the p - P_EDL ~ 0.5 $/kWh the
+    # price-menu step of 0.0063 $/kWh, and against the p - P_EDL ~ 0.2 $/kWh the
     # village saves by moving load into an hour where EDL has capacity to
     # spare. Set it to 0 to recover the earlier, degenerate behaviour.
     # -----------------------------------------------------------------------
     "eps_shift": 0.001,
-    "phat_factor": 2.0,     # [-] leader price cap: Phat_t = phat_factor * P_ref
-                            #     Must stay below 1/alpha_1 (= 2.09): there the suppressed
+    "phat_factor": 1.0 + 0.60 / 0.4031,  # [-] = 2.49; cap Phat = P_ref + 0.60 $/kWh = 1.003 $/kWh,
+                            #     so the 61-level menu steps in exactly 0.01 $/kWh.
+                            #     Keep the 0.4031 here equal to P_ref.
+                            #     Must stay below 1 + 1/alpha_1 (= 3.09): there the suppressed
                             #     demand equals the uncovered load and the follower turns
-                            #     infeasible. The unconstrained optimum is
-                            #     0.5 * (c/P_ref + 1/alpha_1) = 1.67 x P_ref, less
-                            #     sigma/(2*alpha_1) for whatever load the village shifts
-                            #     out of the served hours (1.63 x P_ref on the stochastic
-                            #     winter run), so this cap does NOT bind and the price
-                            #     stays a model outcome.
-    "n_price_levels": 65,   # [-] number of discrete leader price levels in the menu Pi,
+                            #     infeasible. The unconstrained diesel-only optimum is
+                            #     0.5 * (1 + c/P_ref + 1/alpha_1) = 1.82 x P_ref (at
+                            #     c = 0.224 $/kWh), less sigma/(2*alpha_1) for whatever
+                            #     load the village shifts out of the served hours, so
+                            #     this cap does NOT bind and the price stays a model
+                            #     outcome. The menu FLOOR P_ref is the closer bound:
+                            #     check that reported prices stay above it.
+    "n_price_levels": 61,   # [-] number of discrete leader price levels in the menu Pi,
                             #     evenly spaced over [P_ref, Phat] (below P_ref the demand
                             #     response is infeasible). With a flat tariff the whole
                             #     decision is this one scalar, so the step size IS the
                             #     precision of the reported price -- and of the suppressed
                             #     demand, which is alpha_1 * (p/P_ref - 1) and therefore
-                            #     inherits it directly. 65 levels = 0.031 x P_ref: at 9
+                            #     inherits it directly. 61 levels over [P_ref, P_ref + 0.60]
+                            #     = 0.01 $/kWh = 0.025 x P_ref: at 9
                             #     levels the menu step was 0.25 x P_ref, which moved the
                             #     reported suppression by 4-8 percentage points while
                             #     barely changing profit (the optimum is a flat parabola).
@@ -164,7 +191,11 @@ CONFIG = {
 
     # Solver / numerical
     "M_phys": 1e4, # [kWh] large constant for big-M constraints, should be larger than any physically feasible quantity in the model
-    "MIPGap": 1e-4, # [-] relative MIP gap for solver termination
+    "MIPGap": 1e-6, # [-] relative MIP gap for solver termination. Must resolve
+                    #     adjacent price levels: near the optimum two 0.01 $/kWh
+                    #     menu steps can differ by < 0.01% of profit, so 1e-4
+                    #     let the solver report either (summer PV no supply
+                    #     came out at 0.723 instead of 0.733).
     "TimeLimit": 300, # [s] time limit for solver runs (e.g., for sensitivity analyses)
 }
 

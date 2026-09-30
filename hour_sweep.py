@@ -26,6 +26,17 @@ WHAT IS REPORTED: THE PRICE DEVIATION FROM NO SUPPLY
 The reference is the same season, fleet and load shift with EDL off all day, so
 N = 0 IS the reference and every line starts at zero there.
 
+THE REGRET OF KEEPING THE NO-SUPPLY PRICE                          (--regret)
+    regret   = profit - profit at p(no supply)            [$/day]
+    regret % = 100 * regret / profit                      [% of optimal profit]
+
+"Profit at p(no supply)" is the same window, the village scheduling for it,
+with the price menu reduced to that season's no-supply price: what the leader
+earns if it ignores EDL's window and keeps its no-supply price. That price is
+on the full menu, so the regret is non-negative up to the solver gap (any
+value below it is printed); it is 0 at 0 h and wherever the two prices
+coincide, which needs no solve.
+
 THE FLEET                                                        [ASSUMPTION]
 Fixed: config's 400 kW genset plus 200 kWp of PV, at 10% load shift. The PV is
 what gives the hours different costs, so the window's placement can move the
@@ -44,11 +55,16 @@ Outputs, under :data:`config.OUTPUT_DIR`:
     hour_sweep_nopv.*  the same two, for --no-pv
     hour_sweep_profit.png  2 x 2: the leader's profit, no PV left and PV
                        right, peak on top and offpeak below (--profit)
+    hour_sweep_regret.png  the same panels: the regret of keeping the
+                       no-supply price, in % of optimal profit (--regret;
+                       the regret columns are added to both workbooks)
 
 Usage:
     python hour_sweep.py
     python hour_sweep.py --no-pv
     python hour_sweep.py --profit          # needs both workbooks; no solving
+    python hour_sweep.py --regret          # needs both workbooks; fixed-price solves
+    python hour_sweep.py --regret --replot # redraw the regret figure only
     python hour_sweep.py --seasons winter
     python hour_sweep.py --replot          # redraw, no solving
 """
@@ -60,12 +76,14 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from openpyxl import Workbook, load_workbook
+from pyomo.environ import TerminationCondition, value
 
 import config
 from asset_sweep import (INK, SEASON_COLOR, SEASON_LABEL, SEASON_MARKER,
                          AXIS, MUTED, RULE, _layout_issues, _style,
                          _write_rows,
                          menu_step)
+from model.bilevel_mpec import BilevelMPEC
 from pattern_sweep import solve_at_belief
 from run import build_instance
 from stochastic_commitment_analysis import TIME_LIMIT_S, Build, build_settings
@@ -99,7 +117,10 @@ FIELDS = [
     ("profit",       "leader profit [$/day]"),
     ("profit_ref",   "profit, no supply [$/day]"),
     ("d_profit",     "profit deviation [$/day]"),
-    ("qMGO",         "microgrid sales [kWh]"),
+    ("profit_hold",  "profit at the no-supply price [$/day]"),
+    ("regret",       "regret of keeping the no-supply price [$/day]"),
+    ("regret_pct",   "regret of keeping the no-supply price [% of profit]"),
+    ("qMGO",        "microgrid sales [kWh]"),
     ("qPG",          "EDL delivered [kWh]"),
     ("qsupp",        "suppressed demand [kWh]"),
     ("qcri",         "unserved [kWh]"),
@@ -180,6 +201,80 @@ def sweep(seasons: list[str], hours: list[int], build: Build, opts: dict,
 
 
 # --------------------------------------------------------------------------
+# Solving: the regret of keeping the no-supply price
+# --------------------------------------------------------------------------
+_OK = (TerminationCondition.optimal, TerminationCondition.feasible)
+
+
+def solve_at_price(season: str, Qbar: dict, price: float,
+                   opts: dict) -> dict | None:
+    """
+    The certain window with the menu reduced to ``price``: the leader cannot
+    re-price, the village schedules for the window it knows.
+    """
+    data = dict(build_instance(season))
+    T = data["T"]
+    data["S"], data["prob"] = ["window"], {"window": 1.0}
+    data["QbarPG"] = {(t, "window"): Qbar[t] for t in T}
+    data["Pi"] = [price]
+
+    mpec = BilevelMPEC(data)
+    m = mpec.build()
+    solver_name, res = mpec.solve("gurobi", options=opts)
+    if solver_name is None:
+        raise RuntimeError(
+            "Gurobi not available (check the license and that gurobipy is "
+            "installed).")
+    tc = res.solver.termination_condition
+    if tc not in _OK:
+        print(f"    not solved ({tc})")
+        return None
+    return {"profit": value(m.profit), "termination": str(tc)}
+
+
+def regret_runs(rows: list[dict], build: Build, opts: dict) -> None:
+    """
+    Fill in the profit at the no-supply price and the regret of every run that
+    lacks them, in place. Runs at the no-supply price already -- 0 h, and
+    every window whose optimum is that price -- take their own profit.
+    """
+    cap = config.CONFIG["M_phys"]
+    tol = config.CONFIG["MIPGap"]
+    for season in [s for s in config.SEASONS
+                   if any(r["season"] == s for r in rows)]:
+        T = sorted(build_instance(season)["D"])
+        todo = [r for r in rows if r["season"] == season
+                and r.get("regret_pct") is None and r.get("d_p") is not None]
+        if not todo:
+            continue
+        print(f"\n[{season}] {build.label}, regret of keeping the no-supply "
+              f"price ({len(todo)} windows)")
+        for r in sorted(todo, key=lambda r: (r["series"], r["hours"])):
+            if abs(r["d_p"]) <= 1e-9:
+                hold = r["profit"]
+            else:
+                on = {int(h) for h in str(r.get("on_hours") or "").split(",")
+                      if h.strip()}
+                Qbar = {t: (cap if t in on else 0.0) for t in T}
+                with build_settings(build):
+                    rec = solve_at_price(season, Qbar, r["p_ref"], opts)
+                if rec is None:
+                    continue
+                hold = rec["profit"]
+            r["profit_hold"] = hold
+            r["regret"] = r["profit"] - hold
+            r["regret_pct"] = (100.0 * r["regret"] / r["profit"]
+                               if r["profit"] > 1e-9 else None)
+            print(f"    {r['series']:>10} {r['hours']:2d} h  "
+                  f"Δp={r['d_p_steps']:+3.0f} steps  profit={r['profit']:8.2f}  "
+                  f"at p(no supply)={hold:8.2f}  regret={r['regret']:6.2f} "
+                  f"({r['regret_pct'] or 0.0:5.2f}%)")
+            if r["regret"] < -max(1e-6, tol * abs(r["profit"])):
+                print(f"    !! negative regret: {season}, {r['series']}, "
+                      f"{r['hours']} h — the optimal run fell short")
+
+
+# --------------------------------------------------------------------------
 # Plot
 # --------------------------------------------------------------------------
 COLUMNS = (
@@ -234,6 +329,8 @@ def _finish(fig, axes, out_path, *, order: list[str], hours: list[int],
     """Shared x ticks and x labels, the season legend, the title, and save."""
     for ax in axes[-1]:
         ax.set_xlabel("Hours EDL supplies   [h]", fontsize=10, color=INK)
+    # Shared x hides the upper row's hour labels; every panel keeps them.
+    for ax in axes.flat:
         ax.tick_params(axis="x", labelbottom=True)
     swept = sorted({0, *hours})
     # Every solved length gets a tick while they fit; an hour-by-hour sweep is
@@ -310,6 +407,66 @@ def plot_profit(by_fleet: list[tuple[str, list[dict]]], out_path, *,
     four panels share one y axis, so the gap between the columns is what the
     PV is worth to the leader at each window length.
     """
+    _plot_by_fleet(
+        by_fleet, out_path, seasons=seasons, key="profit",
+        ylabel="Leader profit   [$ / day]", fmt=lambda v, _: f"{v:,.0f}",
+        title=f"The leader's profit against the length of EDL's window, "
+              f"without PV (left) and with PV (right), at "
+              f"{100 * shift:.0f}% load shift. EDL covers its hours "
+              f"completely and nothing else; 0 h is the no-supply run")
+
+
+def plot_regret(by_fleet: list[tuple[str, list[dict]]], out_path, *,
+                seasons: list[str], shift: float) -> None:
+    """The regret of keeping the no-supply price, in % of optimal profit, in
+    the panels of :func:`plot_profit`; each line's peak carries its absolute
+    regret in $/day."""
+    _plot_by_fleet(
+        by_fleet, out_path, seasons=seasons, key="regret_pct",
+        ylabel="Regret   [% of optimal profit]",
+        fmt=lambda v, _: f"{v:g}%",
+        peak_label=("regret", lambda v: f"{v:.1f} $/day"),
+        title=f"What keeping the no-supply price would cost the leader, "
+              f"against the length of EDL's window, without PV (left) and "
+              f"with PV (right), at {100 * shift:.0f}% load shift. Regret = "
+              f"optimal profit minus profit at the no-supply price, the "
+              f"village scheduling for the window in both")
+
+
+def _label_peaks(ax, rows: list[dict], pattern: str, key: str,
+                 order: list[str], label_key: str, label_fmt) -> None:
+    """
+    Ring each season line's highest point and write ``label_key`` of that run
+    beside it, in the season's colour. Labels are stacked by season order so
+    that peaks at the same height do not print over each other.
+    """
+    for k, season in enumerate(order):
+        sel = [r for r in rows if r["season"] == season
+               and r["series"] == pattern and r.get(key) is not None
+               and r.get(label_key) is not None]
+        if not sel:
+            continue
+        # A flat top (the same % at several lengths) is labelled where the
+        # labelled field is largest, not at whichever length comes first.
+        top = max(sel, key=lambda r: (round(r[key], 6), r[label_key]))
+        color = SEASON_COLOR[season]
+        ax.plot(top["hours"], top[key], marker="o", markersize=11,
+                markerfacecolor="none", markeredgecolor=color,
+                markeredgewidth=1.4, zorder=4)
+        ax.annotate(label_fmt(top[label_key]), (top["hours"], top[key]),
+                    xytext=(0, 9 + 12 * k), textcoords="offset points",
+                    ha="center", va="bottom", fontsize=8.5, color=color,
+                    fontweight="bold", zorder=5,
+                    bbox=dict(boxstyle="round,pad=0.15", facecolor="white",
+                              edgecolor="none", alpha=0.85))
+
+
+def _plot_by_fleet(by_fleet: list[tuple[str, list[dict]]], out_path, *,
+                   seasons: list[str], key: str, ylabel: str, fmt,
+                   title: str, peak_label=None) -> None:
+    """``key`` against the window length, one column per fleet: peak on top,
+    offpeak below, all four panels on one y axis. ``peak_label`` =
+    ``(field, format)`` labels each line's peak with that field."""
     order = [s for s in config.SEASONS if s in seasons]
     hours = sorted({r["hours"] for _, rows in by_fleet for r in rows
                     if r["hours"]})
@@ -323,19 +480,20 @@ def plot_profit(by_fleet: list[tuple[str, list[dict]]], out_path, *,
             # Shared axes hide their inner tick labels; each column is read on
             # its own, so every panel keeps its numbers.
             ax.tick_params(axis="y", labelleft=True)
-            _season_lines(ax, rows, pattern, "profit", order)
+            _season_lines(ax, rows, pattern, key, order)
+            if peak_label:
+                _label_peaks(ax, rows, pattern, key, order, *peak_label)
             ax.set_title(f"{ROW_TITLE[pattern]}  ·  {fleet}", loc="left",
                          fontsize=10, color=INK)
             if j == 0:
-                ax.set_ylabel("Leader profit   [$ / day]", fontsize=9.5,
-                              color=INK)
+                ax.set_ylabel(ylabel, fontsize=9.5, color=INK)
 
-    axes[0, 0].yaxis.set_major_formatter(lambda v, _: f"{v:,.0f}")
-    _finish(fig, axes, out_path, order=order, hours=hours,
-            title=f"The leader's profit against the length of EDL's window, "
-                  f"without PV (left) and with PV (right), at "
-                  f"{100 * shift:.0f}% load shift. EDL covers its hours "
-                  f"completely and nothing else; 0 h is the no-supply run")
+    if peak_label:
+        # Headroom for the stacked labels above the highest peak.
+        lo, hi = axes[0, 0].get_ylim()
+        axes[0, 0].set_ylim(lo, hi + 0.22 * (hi - lo))
+    axes[0, 0].yaxis.set_major_formatter(fmt)
+    _finish(fig, axes, out_path, order=order, hours=hours, title=title)
 
 
 # --------------------------------------------------------------------------
@@ -371,7 +529,7 @@ def load_rows(path) -> list[dict]:
 # --------------------------------------------------------------------------
 def main(seasons: list[str] | None = None, time_limit: float = TIME_LIMIT_S,
          replot: bool = False, no_pv: bool = False,
-         profit: bool = False) -> None:
+         profit: bool = False, regret: bool = False) -> None:
     seasons = seasons or list(config.SEASONS.keys())
     hours = list(HOURS)
     shift = SHIFT
@@ -383,6 +541,49 @@ def main(seasons: list[str] | None = None, time_limit: float = TIME_LIMIT_S,
     out_dir.mkdir(parents=True, exist_ok=True)
     stem = "hour_sweep_nopv" if no_pv else "hour_sweep"
     book, figure = out_dir / f"{stem}.xlsx", out_dir / f"{stem}.png"
+
+    if regret:
+        # Both fleets side by side. The optimal runs come from the workbooks;
+        # only the fixed-price runs they lack are solved, then written back.
+        books = [(out_dir / "hour_sweep_nopv.xlsx", 0.0),
+                 (out_dir / "hour_sweep.xlsx", PV_KWP)]
+        missing = [str(b) for b, _ in books if not b.exists()]
+        if missing:
+            print(f"missing {', '.join(missing)} — run the sweep for that "
+                  f"fleet first")
+            return
+        opts = {"MIPGap": config.CONFIG["MIPGap"], "TimeLimit": time_limit}
+        by_fleet = []
+        for b, pv in books:
+            rows = load_rows(b)
+            for r in rows:
+                if r["series"] == NONE and r.get("regret_pct") is None:
+                    r["profit_hold"], r["regret"], r["regret_pct"] = (
+                        r["profit"], 0.0, 0.0)
+            if not replot:
+                build = Build("regret", rows[0]["fleet"], DG_KW, pv,
+                              rows[0]["shift"])
+                regret_runs([r for r in rows if r["season"] in seasons],
+                            build, opts)
+                save_analysis(rows, b, step)
+            by_fleet.append((rows[0]["fleet"], rows))
+            print(f"\n=== largest regret of keeping the no-supply price, "
+                  f"{rows[0]['fleet']}")
+            for season in [s for s in config.SEASONS if s in seasons]:
+                for pattern in PATTERNS:
+                    sel = [r for r in rows if r["season"] == season
+                           and r["series"] == pattern
+                           and r.get("regret_pct") is not None]
+                    if sel:
+                        top = max(sel, key=lambda r: r["regret_pct"])
+                        print(f"  {season:>12} {pattern:>8}  "
+                              f"{top['regret_pct']:5.2f}% "
+                              f"({top['regret']:6.2f} $/day) at "
+                              f"{top['hours']:2d} h, Δp "
+                              f"{top['d_p_pct']:+5.1f}%")
+        plot_regret(by_fleet, out_dir / "hour_sweep_regret.png",
+                    seasons=seasons, shift=by_fleet[0][1][0]["shift"])
+        return
 
     if profit:
         # Both fleets side by side, from their workbooks; no solving.
@@ -442,5 +643,11 @@ if __name__ == "__main__":
     parser.add_argument("--profit", action="store_true",
                         help="Draw the profit figure, no PV against PV, from "
                              "both workbooks without solving anything.")
+    parser.add_argument("--regret", action="store_true",
+                        help="Solve every window at its season's no-supply "
+                             "price and draw the regret of keeping that "
+                             "price, both fleets, from both workbooks; with "
+                             "--replot only redraw.")
     args = parser.parse_args()
-    main(args.seasons, args.time_limit, args.replot, args.no_pv, args.profit)
+    main(args.seasons, args.time_limit, args.replot, args.no_pv, args.profit,
+         args.regret)

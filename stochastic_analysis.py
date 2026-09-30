@@ -584,7 +584,7 @@ def _plot_range(season: str, blob: dict, ykey: str, out_path, *,
         # A dropped end means the line stops short of the swept range: say
         # where it actually stops rather than let the legend speak for it.
         if row["w_start"] > w_lo + _TOL or row["w_end"] < w_hi - _TOL:
-            note += f"\n$P$ = {row['w_start']:.2f} … {row['w_end']:.2f}"
+            note += f"\nprob = {row['w_start']:.2f} … {row['w_end']:.2f}"
         ax.annotate(note, (0.5 * (start + end), y), xytext=(0, 11),
                     textcoords="offset points", ha="center", va="bottom",
                     fontsize=7.5, color="#333333")
@@ -610,7 +610,7 @@ def _plot_range(season: str, blob: dict, ykey: str, out_path, *,
     ax.set_ylabel("EDL supply outcome")
     ax.set_title(
         f"{title} — {season}\n"
-        f"each line runs from $P$(outcome) = {w_lo:.2f} to {w_hi:.2f} "
+        f"each line runs from prob = {w_lo:.2f} to {w_hi:.2f} "
         f"({len(ws)} weights solved), "
         "no supply taking the rest", fontsize=12)
     ax.grid(axis="x", linestyle=":", alpha=0.5)
@@ -623,10 +623,10 @@ def _plot_range(season: str, blob: dict, ykey: str, out_path, *,
         plt.Line2D([], [], linestyle="none", marker="o", markersize=8,
                    markerfacecolor="white", markeredgecolor="#444444",
                    markeredgewidth=2.0,
-                   label=f"$P$(outcome) = {w_lo:.2f}"),
+                   label=f"prob = {w_lo:.2f}"),
         plt.Line2D([], [], linestyle="none", marker="D", markersize=8,
                    markerfacecolor="#444444", markeredgecolor="#222222",
-                   label=f"$P$(outcome) = {w_hi:.2f}"
+                   label=f"prob = {w_hi:.2f}"
                          + ("  (certain)" if w_hi >= 1.0 - _TOL else "")),
         plt.Line2D([], [], linestyle="none", marker="|", markersize=9,
                    markeredgewidth=1.2, color="#333333",
@@ -685,7 +685,7 @@ def plot_ranges(season: str, blob: dict, price_path, profit_path) -> None:
         title="Where the leader's belief moves the price",
         fmt="{:.3f}",
         marks=[(P_ref, f"$P_{{ref}}$ = {P_ref:.3f}", ":", GREY, 1.1),
-               (*_mark(ref, "p", "{:.3f}", "no supply, $P=1$:"), "--", GREY,
+               (*_mark(ref, "p", "{:.3f}", "no supply, prob = 1:"), "--", GREY,
                 1.1),
                (*p_commit, "-.", INK, 2.0)])
 
@@ -697,7 +697,7 @@ def plot_ranges(season: str, blob: dict, price_path, profit_path) -> None:
         title="Where the leader's belief moves the profit",
         fmt="{:,.1f}",
         marks=[(0.0, None, "-", GREY, 0.8),
-               (*_mark(ref, "profit", "{:,.1f}", "no supply, $P=1$:"), "--",
+               (*_mark(ref, "profit", "{:,.1f}", "no supply, prob = 1:"), "--",
                 GREY, 1.1),
                (*_mark(commitment, "profit", "{:,.1f}", "commitment:"), "-.",
                 INK,

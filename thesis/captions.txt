@@ -1,0 +1,65 @@
+FIGURE TITLES REMOVED FOR THE THESIS VERSION
+============================================
+
+The figures in this folder carry no title inside the image -- in the thesis
+the title belongs in the LaTeX \caption below the figure. The text that was
+removed from each figure is listed here as the starting point for that caption.
+
+Generated from output/*.xlsx; the numbers are identical to the figures in output/.
+Model figures regenerated 2026-09-28 (q_supp = alpha_1 (p - P_ref)/P_ref Rbar,
+price menu in 0.01 $/kWh steps); input-data figures unchanged.
+
+  season_profiles.png
+      Representative days: village demand and rooftop PV
+  scenario_assumptions_fall_spring.png
+      Assumed EDL supply scenarios — fall/spring baseline capacity 0.275 MW · announced window 6 h · daily demand 3,871 kWh · PV yield 3.60 kWh/kWp
+  scenario_assumptions_summer.png
+      Assumed EDL supply scenarios — summer baseline capacity 0.275 MW · announced window 6 h · daily demand 6,969 kWh · PV yield 5.16 kWh/kWp
+  scenario_assumptions_winter.png
+      Assumed EDL supply scenarios — winter baseline capacity 0.275 MW · announced window 6 h · daily demand 4,257 kWh · PV yield 1.98 kWh/kWp
+  pattern_assumptions.png
+      Synthetic EDL timing patterns: EDL covers its 8 hours completely ($\bar Q_t = M_{phys}$), so the two patterns differ in energy as well as timing
+  pattern_peak.png
+      EDL on the highest-demand hours (peak): what it does to the leader, across 0 / 10 / 20% load shift, at prob = 1
+  pattern_offpeak.png
+      EDL on the lowest-demand hours (offpeak): what it does to the leader, across 0 / 10 / 20% load shift, at prob = 1
+  hour_sweep.png
+      The leader's price against the length of EDL's window, on 400 kW DG + 200 kWp PV at 10% load shift. EDL covers its hours completely and nothing else; 0 h is the no-supply run each line is measured from
+  hour_sweep_nopv.png
+      The leader's price against the length of EDL's window, on 400 kW DG at 10% load shift. EDL covers its hours completely and nothing else; 0 h is the no-supply run each line is measured from
+  hour_sweep_profit.png
+      The leader's profit against the length of EDL's window, without PV (left) and with PV (right), at 10% load shift. EDL covers its hours completely and nothing else; 0 h is the no-supply run
+  hour_sweep_regret.png
+      What keeping the no-supply price would cost the leader, against the length of EDL's window, without PV (left) and with PV (right), at 10% load shift. Regret = optimal profit minus profit at the no-supply price, the village scheduling for the window in both
+  stochastic_sweep_price.png
+      The price the leader commits to against prob, balanced information, at 10% load shift. prob = 0 is the no-supply run, so the figure at each line's right end is its change from there
+  stochastic_sweep_information.png
+      The leader's expected profit under three information cases, against prob, at 10% load shift
+  stochastic_sweep_evpi.png
+      What learning the EDL outcome before pricing is worth to the leader, against prob, at 10% load shift
+  stochastic_sweep_repricing.png
+      What re-optimizing its price for a perfectly informed village is worth to the leader, against prob, at 10% load shift
+  stochastic_sweep_vss.png
+      What pricing against the belief, rather than against the mean day, is worth to the leader, against prob, at 10% load shift
+  stochastic_sweep_shift.png
+      How much energy the village shifts in the balanced run, against prob, at 10% load shift
+  asset_sweep_price.png
+      How the PV fleet moves the leader's price under EDL's timing patterns
+  asset_sweep_profit.png
+      How the PV fleet moves the leader's profit under EDL's timing patterns
+  timeseries_winter.png
+      24 h dispatch under the EDL timing patterns — winter, prob = 1, 10% load shift
+  lebanon_summerday_scenarios.png
+      EDL availability scenarios — Lebanese summer day (daily demand 6,969 kWh)
+  lebanon_summerday_village.png
+      The village's committed load shift · 278 kWh planned, price 0.723 \$/kWh
+  lebanon_summerday_information.png
+      Village information — Lebanese summer day, 400 kW DG + 200 kWp PV
+  lebanon_summerday_evpi.png
+      Leader's EVPI and regret — Lebanese summer day, 400 kW DG + 200 kWp PV · load shift held at each setting's schedule
+  lebanon_summerday_regret.png
+      What the village's load shift is worth to the leader — Lebanese summer day, 400 kW DG + 200 kWp PV
+  lebanon_summerday_boxes.png
+      Price and profit over the EDL outcomes — Lebanese summer day, 400 kW DG + 200 kWp PV
+  lebanon_summerday_shift.png
+      Village load-shift schedule under the stochastic commitment — Lebanese summer day, 400 kW DG + 200 kWp PV

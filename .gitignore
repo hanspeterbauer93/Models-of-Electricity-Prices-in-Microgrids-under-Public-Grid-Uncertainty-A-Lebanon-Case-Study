@@ -1,4 +1,25 @@
+# Whitelist: ignore everything, then re-include only the active Python code
+# and the model outputs. A directory must be re-included before files in it.
+/*
+!/.gitignore
+
+# active code (archive/ stays ignored)
+!/*.py
+!/model/
+/model/*
+!/model/*.py
+!/data/
+/data/*
+!/data/*.py
+!/data/*.yaml
+
+# model outputs, including subfolders
+!/output/
+
+# thesis figures
+!/thesis/
+
+# never, even inside re-included folders
 __pycache__/
 *.pyc
-.claude/settings.local.json
 .~lock.*#

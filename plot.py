@@ -31,6 +31,23 @@ import argparse
 import matplotlib
 matplotlib.use("Agg")             # headless / file output
 import matplotlib.pyplot as plt
+
+# --------------------------------------------------------------------------
+# One typeface for every figure in the project. Liberation Sans is metric-
+# compatible with Arial, so the figures match the slide template instead of
+# standing out in matplotlib's DejaVu Sans; math text follows the same face.
+# Every plotting module imports this one (directly or through asset_sweep /
+# stochastic_analysis), so setting it here is enough. DejaVu stays as the
+# fallback where Liberation is not installed.
+# --------------------------------------------------------------------------
+plt.rcParams.update({
+    "font.family": "sans-serif",
+    "font.sans-serif": ["Liberation Sans", "Arial", "DejaVu Sans"],
+    "mathtext.fontset": "custom",
+    "mathtext.rm": "Liberation Sans",
+    "mathtext.it": "Liberation Sans:italic",
+    "mathtext.bf": "Liberation Sans:bold",
+})
 import numpy as np
 from pyomo.environ import value, TerminationCondition
 

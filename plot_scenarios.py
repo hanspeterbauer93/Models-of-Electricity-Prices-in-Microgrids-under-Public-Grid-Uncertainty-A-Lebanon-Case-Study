@@ -53,16 +53,27 @@ its own share), and how much of the day's sun it holds, since the whole price
 effect in ``pattern_sweep`` runs through whether EDL takes the sunny hours or
 the dark ones out of the microgrid's market.
 
+THE SEASONS
+-----------
+A third figure leaves EDL out entirely and shows the three representative days
+themselves, one panel per season on a shared kWh axis: the households' gross
+demand, what their 250 x 4 kWp of rooftop PV generates, and the net demand D_t
+the model actually sees. The gap between gross and net is the self-consumed PV;
+generation above the gross curve is surplus that is not fed in.
+
 Outputs, under :data:`config.OUTPUT_DIR`:
 
     scenario_assumptions_<season>.png    the six EDL outcomes
     pattern_assumptions.png              the peak / offpeak timing patterns,
                                          all seasons in one figure
+    season_profiles.png                  demand and rooftop PV per season,
+                                         all seasons in one figure
 
 Usage:
-    python plot_scenarios.py                          # both, all three seasons
+    python plot_scenarios.py                          # all, all three seasons
     python plot_scenarios.py --seasons winter summer
     python plot_scenarios.py --figures patterns
+    python plot_scenarios.py --figures seasons
 """
 
 import argparse
@@ -74,7 +85,7 @@ import matplotlib.pyplot as plt
 from matplotlib.patches import Patch
 
 import config
-from data.input_data import load_data
+from data.input_data import get_demand, load_data
 from plot import COLORS, SCENARIO_COLOR
 from run import build_instance
 from scenarios import (BASELINE_KW, SCENARIOS, WINDOW_HOURS,
@@ -241,7 +252,7 @@ def plot_season(season: str, out_path) -> dict:
                         fontsize=FONT["panel_title"], color="#888888",
                         style="italic")
 
-        ax.set_title(f"{sc.label}   ($P$ = {sc.prob:.2f})",
+        ax.set_title(f"{sc.label}   (prob = {sc.prob:.2f})",
                      fontsize=FONT["panel_title"], pad=7)
         note = (f"{energy:,.0f} kWh/day  =  {share:.0f}% of demand\n"
                 f"{n_hours} h of supply"
@@ -299,10 +310,10 @@ def plot_season(season: str, out_path) -> dict:
     return summary
 
 
-def _pattern_row(axes, ax_pv, season: str, patterns: list[str], y_max: float,
+def _pattern_row(axes, season: str, patterns: list[str], y_max: float,
                  *, top: bool, bottom: bool) -> dict:
     """
-    One season's row of the pattern figure: a panel per pattern, then phi_t.
+    One season's row of the pattern figure: a panel per pattern.
 
     In the hours a pattern names, EDL's cap is M_phys: it covers whatever is
     there, so the hour is taken over COMPLETELY and the cap itself is not a
@@ -385,15 +396,6 @@ def _pattern_row(axes, ax_pv, season: str, patterns: list[str], y_max: float,
 
     axes[0].set_ylabel(f"{season.replace('_', '/').capitalize()}\n"
                        f"Energy per hour  [kWh]", fontsize=FONT["axis"])
-
-    # phi_t in its own unit, beside the two panels on the same hour axis.
-    _pv_strip(ax_pv, phi, T, season)
-    ax_pv.set_title(("PV capacity factor $\\varphi_t$\n" if top else "")
-                    + f"{yield_day:.2f} kWh/kWp per day",
-                    fontsize=FONT["note"] + 0.5, loc="left", pad=6)
-    ax_pv.tick_params(labelbottom=bottom)
-    if not bottom:
-        ax_pv.set_xlabel("")
     summary["_demand"] = D_total
     return summary
 
@@ -403,8 +405,9 @@ def plot_patterns(seasons: list[str], out_path,
     """
     The synthetic timing patterns for every season, in one figure.
 
-    A row per season, a column per pattern, and the season's PV capacity factor
-    beside them. All demand panels share one scale, so a season's height can be
+    A row per season, a column per pattern; the season's PV profile itself is
+    in the season figure (:func:`plot_seasons`). All demand panels share one
+    scale, so a season's height can be
     read against the others -- summer's night-time peak is what makes its row
     tallest, and that is worth seeing rather than normalising away.
     """
@@ -414,8 +417,7 @@ def plot_patterns(seasons: list[str], out_path,
 
     nrows = len(order)
     fig = plt.figure(figsize=(16.0, 3.9 * nrows + 1.6))
-    gs = fig.add_gridspec(nrows, len(patterns) + 1,
-                          width_ratios=[1.0] * len(patterns) + [0.55])
+    gs = fig.add_gridspec(nrows, len(patterns))
 
     summaries = {}
     first = None
@@ -426,9 +428,8 @@ def plot_patterns(seasons: list[str], out_path,
             ax = fig.add_subplot(gs[r, c], **kw)
             first = first or ax
             row_axes.append(ax)
-        ax_pv = fig.add_subplot(gs[r, len(patterns)])
         summaries[season] = _pattern_row(
-            row_axes, ax_pv, season, patterns, y_max,
+            row_axes, season, patterns, y_max,
             top=(r == 0), bottom=(r == nrows - 1))
 
     fig.suptitle(
@@ -451,9 +452,101 @@ def plot_patterns(seasons: list[str], out_path,
     return summaries
 
 
+def plot_seasons(seasons: list[str], out_path) -> dict:
+    """
+    The representative days themselves: demand and rooftop PV, a panel per season.
+
+    Everything is in kWh per hour on ONE shared scale, so the seasons can be
+    read against each other:
+
+        gross demand   400 non-PV households + 250 PV owners, before any PV
+        rooftop PV     250 x 4 kWp x phi_t, all of it, surplus included
+        net demand     D_t -- gross demand less the self-consumed PV, the load
+                       the model is built on (:func:`data.input_data.get_demand`)
+    """
+    cfg = config.CONFIG
+    bundle = load_data()
+    order = [s for s in config.SEASONS if s in seasons]
+    kwp = cfg["n_Households_PV"] * cfg["cap_PV_per_HH"]      # rooftop fleet [kWp]
+
+    profiles = {}
+    for season in order:
+        T = list(range(24))
+        gross = {t: cfg["n_Households_nonPV"] * bundle["demand_non_pv"][season][t]
+                    + cfg["n_Households_PV"] * bundle["demand_pv_owner"][season][t]
+                 for t in T}
+        pv = {t: kwp * bundle["cap_factor"][season][t] for t in T}
+        profiles[season] = (T, gross, pv, get_demand(bundle, cfg, season))
+
+    y_max = max(max(max(g.values()), max(p.values()))
+                for _, g, p, _ in profiles.values()) * 1.22
+
+    fig, axes = plt.subplots(1, len(order), figsize=(5.2 * len(order) + 0.6, 5.4),
+                             sharex=True, sharey=True, squeeze=False)
+    summaries = {}
+    for ax, season in zip(axes[0], order):
+        T, gross, pv, D = profiles[season]
+
+        xp, yp = _blocks(pv, T)
+        ax.fill_between(xp, yp, step="post", color=PV_FILL, alpha=0.75,
+                        linewidth=0, label=f"Rooftop PV generation ({kwp:,.0f} kWp)")
+        ax.step(xp, yp, where="post", color=PV_EDGE, linewidth=1.4)
+
+        xg, yg = _blocks(gross, T)
+        ax.step(xg, yg, where="post", color="#555555", linewidth=2.0,
+                label="Gross household demand")
+        xd, yd = _blocks(D, T)
+        ax.step(xd, yd, where="post", color=COLORS["demand"], linewidth=2.0,
+                linestyle="--", label="Net demand $D_t$ (model input)")
+
+        s = {"gross": sum(gross.values()), "pv": sum(pv.values()),
+             "net": sum(D.values()),
+             "peak_hour": max(T, key=lambda t: D[t])}
+        s["self"] = s["gross"] - s["net"]
+        s["peak"] = D[s["peak_hour"]]
+        summaries[season] = s
+
+        ax.set_title(season.replace("_", "/").title(),
+                     fontsize=FONT["panel_title"], pad=7)
+        ax.annotate(f"gross {s['gross']:,.0f} kWh/day  ·  PV {s['pv']:,.0f} kWh/day\n"
+                    f"net {s['net']:,.0f} kWh/day  ·  peak {s['peak']:,.0f} kWh "
+                    f"at h{s['peak_hour']:02d}",
+                    (0.5, 0.985), xycoords="axes fraction", ha="center",
+                    va="top", fontsize=FONT["note"], color="#333333",
+                    bbox=dict(boxstyle="round,pad=0.32", fc="white",
+                              ec="#cccccc", alpha=0.88))
+
+        _hour_axis(ax)
+        ax.set_ylim(0, y_max)
+        ax.grid(axis="y", linestyle=":", alpha=0.45)
+        ax.set_xlabel("Hour of day", fontsize=FONT["axis"])
+
+    axes[0][0].set_ylabel("Energy per hour  [kWh]", fontsize=FONT["axis"])
+    fig.suptitle("Representative days: village demand and rooftop PV",
+                 fontsize=FONT["suptitle"], y=0.985)
+
+    handles, labels = axes[0][0].get_legend_handles_labels()
+    fig.legend(handles, labels, loc="lower center", ncol=3,
+               fontsize=FONT["legend"], frameon=False,
+               bbox_to_anchor=(0.5, 0.0))
+
+    fig.tight_layout(rect=(0, 0.07, 1, 0.95))
+    fig.savefig(out_path, dpi=200)
+    print(f"  wrote {out_path}")
+    plt.close(fig)
+    return summaries
+
+
 def main(seasons: list[str], figures: list[str]) -> None:
     out_dir = config.OUTPUT_DIR
     out_dir.mkdir(parents=True, exist_ok=True)
+
+    if "seasons" in figures:
+        for season, s in plot_seasons(
+                seasons, out_dir / "season_profiles.png").items():
+            print(f"[{season}] gross {s['gross']:,.0f}  PV {s['pv']:,.0f}  "
+                  f"self-consumed {s['self']:,.0f}  net {s['net']:,.0f} kWh/day, "
+                  f"net peak {s['peak']:,.0f} kWh at h{s['peak_hour']:02d}")
 
     for season in seasons:
         if "scenarios" in figures:
@@ -494,8 +587,8 @@ if __name__ == "__main__":
                         choices=list(config.SEASONS.keys()),
                         help="Seasons to draw (default: all three).")
     parser.add_argument("--figures", nargs="+",
-                        default=["scenarios", "patterns"],
-                        choices=["scenarios", "patterns"],
-                        help="Which figures to draw (default: both).")
+                        default=["scenarios", "patterns", "seasons"],
+                        choices=["scenarios", "patterns", "seasons"],
+                        help="Which figures to draw (default: all).")
     args = parser.parse_args()
     main(args.seasons, args.figures)

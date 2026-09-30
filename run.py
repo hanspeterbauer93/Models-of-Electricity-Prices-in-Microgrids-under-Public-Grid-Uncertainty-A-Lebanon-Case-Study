@@ -5,14 +5,13 @@ Assembles a model instance from the central config (:mod:`config`) and the
 hourly YAML inputs (:func:`data.input_data.load_data`), then builds and solves
 it with Gurobi.
 
-After the solve it also produces the full output set for that season: the
-per-scenario dispatch/profit plots (:mod:`plot`) and the scenario-mismatch
-matrix (:mod:`scenario_analysis`). Each stage can be switched off individually.
+After the solve it also produces the per-scenario dispatch/profit plots
+(:mod:`plot`) for that season, which can be switched off.
 
 Usage:
-    python run.py                       # default season (winter), all stages
+    python run.py                       # default season (winter), solve + plots
     python run.py --season summer
-    python run.py --skip-mismatch       # solve + plots only
+    python run.py --skip-plots          # solve only
 """
 
 import argparse
@@ -69,6 +68,16 @@ def build_instance(season: str) -> dict:
     #   PV     = variable O&M
     c_diesel = cfg["C_fuel_L"] * cfg["alpha_fuel"] + cfg["c_OV"]["DG"]
     cdiesel = {t: c_diesel for t in T}
+    # Optional two-step heat rate (Svolba 2025): marginal cost below / above the
+    # load threshold; the model then ignores cdiesel for the diesel cost.
+    diesel_curve = None
+    if cfg.get("heat_rate", "constant") == "two_step":
+        hr = cfg["heat_rate_two_step"]
+        diesel_curve = {
+            "threshold": hr["threshold"],
+            "c_low": cfg["C_fuel_L"] * hr["L_per_kWh"][0] + cfg["c_OV"]["DG"],
+            "c_high": cfg["C_fuel_L"] * hr["L_per_kWh"][1] + cfg["c_OV"]["DG"],
+        }
     cPV = {t: cfg["c_OV"]["PV"] for t in T}
 
     # Capacities.
@@ -97,6 +106,7 @@ def build_instance(season: str) -> dict:
         "pVOLL": cfg["C_pen"],                   # value of lost load ~ penalty cost
         "QbarPG": QbarPG,
         "cdiesel": cdiesel,
+        "dieselCurve": diesel_curve,
         "cPV": cPV,
         "Qdiesel": Qdiesel,
         "QPV": QPV,
@@ -155,24 +165,19 @@ def solve_and_save(season: str) -> bool:
     return True
 
 
-def main(season: str = "winter", plots: bool = True,
-         mismatch: bool = True) -> None:
-    """Solve the model, then produce the plots and every analysis."""
+def main(season: str = "winter", plots: bool = True) -> None:
+    """Solve the model, then produce the plots."""
     if not solve_and_save(season):
         return
 
-    # The stage modules are imported here, not at module level: they all import
+    # The stage module is imported here, not at module level: it imports
     # build_instance from this module, so a top-level import would be circular.
-    # (The price and availability sweeps are archived; see archive/README.md.)
+    # (The price and availability sweeps and the scenario-mismatch analysis are
+    # archived; see archive/README.md.)
     if plots:
         print(f"\n=== Plots [{season}] ===")
         import plot
         plot.main(season)
-
-    if mismatch:
-        print(f"\n=== Scenario mismatch analysis [{season}] ===")
-        import scenario_analysis
-        scenario_analysis.main([season])
 
 
 if __name__ == "__main__":
@@ -182,8 +187,5 @@ if __name__ == "__main__":
                         help="Representative season to build the instance for.")
     parser.add_argument("--skip-plots", action="store_true",
                         help="Do not produce the per-scenario plots.")
-    parser.add_argument("--skip-mismatch", action="store_true",
-                        help="Do not run the scenario-mismatch analysis.")
     args = parser.parse_args()
-    main(args.season, plots=not args.skip_plots,
-         mismatch=not args.skip_mismatch)
+    main(args.season, plots=not args.skip_plots)

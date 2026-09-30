@@ -646,7 +646,7 @@ def _plot_span(blob: dict, out_path, *, lo_key: str, hi_key: str,
     handles = [
         plt.Line2D([], [], linestyle="none", marker="o", markersize=8,
                    markerfacecolor="white", markeredgecolor="#444444",
-                   markeredgewidth=2.0, label="no supply, $P$(none) = 1"),
+                   markeredgewidth=2.0, label="no supply, prob = 1"),
         plt.Line2D([], [], linestyle="none", marker="D", markersize=8,
                    markerfacecolor="#444444", markeredgecolor="#222222",
                    label="stochastic commitment, real probabilities"),

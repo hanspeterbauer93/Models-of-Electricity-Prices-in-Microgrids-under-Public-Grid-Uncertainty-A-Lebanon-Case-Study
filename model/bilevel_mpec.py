@@ -8,7 +8,7 @@ Mapping to the LaTeX:
     qMGO     = q^{cov,MGO}_{t,s}
     qPG      = q^{cov,PG}_{t,s}
     Rbar     = [D_t - \bar Q^{PG}_{t,s}]^+   (parameter: uncovered baseline load)
-    qsupp    = q^{supp}_{t,s} = alpha_1 * p_t/P_t * Rbar_{t,s}   (price LEVEL)
+    qsupp    = q^{supp}_{t,s} = alpha_1 * (p_t-P_t)/P_t * Rbar_{t,s}   (deviation; "level" optional)
     qcri     = q^{supp,cri}_{t,s}
     dd       = \Delta d_t            (free, first stage)
     qdiesel  = q^{diesel}_{t,s}
@@ -112,10 +112,37 @@ than two. It is inert at eps = 0: the two rows above then read nu_t >= 0 and
 -nu_t >= 0, which force nu_t = 0, stationarity in \Delta d collapses to exactly
 the equation it had before, and both halves carry a zero reduced cost -- the old
 degenerate behaviour, reproduced rather than special-cased.
+
+LEADER INFORMATION (data["leaderInformed"]):
+Off (the default), the leader's price and its menu binaries are first stage:
+one price for every EDL outcome, exactly as described above. On, the leader
+learns the outcome before it prices, so p and b carry the scenario index --
+p[t,s], b[t,k,s], one menu choice per outcome -- while the village's shift
+\Delta d stays first stage. The lower level keeps its form: the follower's
+expected bill sum_s prob_s p_{t,s} q^{cov,MGO}_{t,s} is still linear in its own
+variables, so rc_mgo and the demand response simply read p[t,s]. The reading is
+a contingent tariff announced in advance, "p_s if outcome s", against which the
+village schedules without knowing s. With a single scenario the two settings
+are the same model.
+
+FOLLOWER INFORMATION (data["followerInformed"]):
+Off (the default), the village's shift \Delta d is first stage: one schedule
+for every EDL outcome. On, the village learns the outcome before it schedules,
+so the whole shift block carries the scenario index -- \Delta d, its split
+\Delta d^{+/-}, the duals gamma^{+/-}, nu and rho, and the shift binaries --
+and the follower's KKT separates by scenario. Two rows change form:
+
+    lambda_{t,s} + gamma^{+}_{t,s} - gamma^{-}_{t,s} + rho_s - nu_{t,s} == 0
+    prob_s * eps +/- nu_{t,s} >= 0
+
+the first because \Delta d_{t,s} enters only scenario s's balance, the second
+because the discomfort is now an expectation, sum_s prob_s eps sum_t |Delta d|.
+|nu| <= prob_s * eps <= eps, so the bound on nu stays implied. With a single
+scenario the two settings are the same model.
 """
 
 from pyomo.environ import (
-    ConcreteModel, Set, Param, Var, Constraint, Objective,
+    ConcreteModel, Set, Param, Var, Constraint, Expression, Objective,
     NonNegativeReals, Reals, Binary, maximize, value,
     SolverFactory, TerminationCondition,
 )
@@ -137,7 +164,9 @@ class BilevelMPEC:
     data : dict
         Instance data. Expected keys: ``T, S, prob, D, P, alpha1, Phat,
         pPG, pVOLL, QbarPG, cdiesel, cPV, Qdiesel, QPV, Pi, shiftFrac, BigM``.
-        Optional: ``flatPrice`` (bool) -- one tariff for the whole day.
+        Optional: ``flatPrice`` (bool) -- one tariff for the whole day;
+        ``dieselCurve`` (dict with ``threshold``, ``c_low``, ``c_high``) -- a
+        two-step heat rate replacing ``cdiesel`` (see :meth:`build`).
     """
 
     def __init__(self, data):
@@ -246,37 +275,70 @@ class BilevelMPEC:
         M_rc_dd = 2.0 * eps if eps > 0.0 else M["rc"]
 
         # ---- upper-level variables ----
-        m.p       = Var(m.T, domain=NonNegativeReals, bounds=lambda mm, t: (0, mm.Phat[t]))
+        # leaderInformed: the price is set per EDL outcome (see the docstring).
+        informed = bool(data.get("leaderInformed", False))
+        # followerInformed: the village's shift is set per EDL outcome.
+        fi = bool(data.get("followerInformed", False))
+        if fi:
+            m.TS = m.T * m.S
+        X = m.TS if fi else m.T          # index set of the shift block
+
+        def _x(t, s):
+            """The shift-block index of hour t under s."""
+            return (t, s) if fi else t
+
+        def _k(i):
+            """A shift-block index from a rule's index arguments."""
+            return tuple(i) if fi else i[0]
+        if informed:
+            m.p = Var(m.T, m.S, domain=NonNegativeReals,
+                      bounds=lambda mm, t, s: (0, mm.Phat[t]))
+        else:
+            m.p = Var(m.T, domain=NonNegativeReals, bounds=lambda mm, t: (0, mm.Phat[t]))
         m.qdiesel = Var(m.T, m.S, domain=NonNegativeReals)   # recourse
         m.qPV     = Var(m.T, m.S, domain=NonNegativeReals)   # recourse
 
         # ---- discrete price menu ----
-        m.b = Var(m.T, m.K, domain=Binary)                   # b[t,k]=1 -> price level k chosen at t
-        m.w = Var(m.T, m.K, m.S, domain=NonNegativeReals)    # w[t,k,s] = b[t,k] * qMGO[t,s]  (exact)
+        if informed:
+            m.b = Var(m.T, m.K, m.S, domain=Binary)          # b[t,k,s]=1 -> level k at t under s
+        else:
+            m.b = Var(m.T, m.K, domain=Binary)               # b[t,k]=1 -> price level k chosen at t
+        m.w = Var(m.T, m.K, m.S, domain=NonNegativeReals)    # w[t,k,s] = b * qMGO[t,s]  (exact)
+
+        def _price(mm, t, s):
+            """The price the follower faces at t under s."""
+            return mm.p[t, s] if informed else mm.p[t]
+
+        def _pick(mm, t, k, s):
+            """The menu binary that prices hour t under s."""
+            return mm.b[t, k, s] if informed else mm.b[t, k]
 
         # ---- lower-level primal variables ----
         m.qMGO  = Var(m.T, m.S,   domain=NonNegativeReals)
         m.qPG   = Var(m.T, m.S,   domain=NonNegativeReals)
         m.qsupp = Var(m.T, m.S,   domain=NonNegativeReals)   # recourse: follows q^{cov,PG}
         m.qcri  = Var(m.T, m.S,   domain=NonNegativeReals)
-        m.dd    = Var(m.T,        domain=Reals)              # free
+        m.dd    = Var(X,          domain=Reals)              # free
         # Δd split by sign, so the discomfort eps * |Δd| stays linear.
-        m.ddp = Var(m.T, domain=NonNegativeReals)
-        m.ddm = Var(m.T, domain=NonNegativeReals)
+        m.ddp = Var(X, domain=NonNegativeReals)
+        m.ddm = Var(X, domain=NonNegativeReals)
 
         # ---- lower-level dual variables ----
         # mu is the dual of the demand response, now one per (t,s) because the
         # response is scenario dependent through Rbar.
         m.lam = Var(m.T, m.S, domain=Reals)                 # free
         m.mu  = Var(m.T, m.S, domain=Reals)                 # free
-        m.rho = Var(          domain=Reals)                 # free scalar
+        if fi:
+            m.rho = Var(m.S, domain=Reals)                  # free, per outcome
+        else:
+            m.rho = Var(          domain=Reals)             # free scalar
         m.beta = Var(m.T, m.S, domain=NonNegativeReals)
-        m.gp   = Var(m.T,      domain=NonNegativeReals)
-        m.gm   = Var(m.T,      domain=NonNegativeReals)
+        m.gp   = Var(X,        domain=NonNegativeReals)
+        m.gm   = Var(X,        domain=NonNegativeReals)
         # Dual of Δd = Δd+ - Δd-. Free in the KKT, but its own two reduced-cost
         # rows (eps + nu >= 0 and eps - nu >= 0) pin it to [-eps, eps], so the
         # bound is implied and only stops the relaxation from roaming.
-        m.nu = Var(m.T, domain=Reals, bounds=(-eps, eps))
+        m.nu = Var(X, domain=Reals, bounds=(-eps, eps))
 
         # ---- complementarity binaries ----
         m.zMGO  = Var(m.T, m.S, domain=Binary)
@@ -284,10 +346,10 @@ class BilevelMPEC:
         m.zsupp = Var(m.T, m.S, domain=Binary)
         m.zcri  = Var(m.T, m.S, domain=Binary)
         m.zbeta = Var(m.T, m.S, domain=Binary)
-        m.zgp   = Var(m.T,      domain=Binary)
-        m.zgm   = Var(m.T,      domain=Binary)
-        m.zddp = Var(m.T, domain=Binary)
-        m.zddm = Var(m.T, domain=Binary)
+        m.zgp   = Var(X,        domain=Binary)
+        m.zgm   = Var(X,        domain=Binary)
+        m.zddp = Var(X, domain=Binary)
+        m.zddm = Var(X, domain=Binary)
 
         # =====================================================================
         # Upper-level constraints
@@ -299,35 +361,79 @@ class BilevelMPEC:
         m.pv_cap = Constraint(
             m.T, m.S, rule=lambda mm, t, s: mm.qPV[t, s] <= mm.QPV[t])
 
+        # ---- diesel cost per hour and outcome ----
+        # Constant heat rate: cdiesel[t] * qdiesel. Two-step heat rate (Svolba
+        # 2025): the whole output sits on ONE step, chosen by zhr (1 = above
+        # the load threshold), qdiesel = qdl + qdh with
+        #     qdl <= thr * Qdiesel * (1 - zhr)
+        #     thr * Qdiesel * zhr <= qdh <= Qdiesel * zhr
+        # Upper level only: the follower's KKT are untouched.
+        curve = data.get("dieselCurve")
+        if curve:
+            thr = curve["threshold"] * data["Qdiesel"]
+            m.qdl = Var(m.T, m.S, domain=NonNegativeReals)
+            m.qdh = Var(m.T, m.S, domain=NonNegativeReals)
+            m.zhr = Var(m.T, m.S, domain=Binary)
+            m.hr_split = Constraint(m.T, m.S, rule=lambda mm, t, s:
+                                    mm.qdiesel[t, s] == mm.qdl[t, s] + mm.qdh[t, s])
+            m.hr_low = Constraint(m.T, m.S, rule=lambda mm, t, s:
+                                  mm.qdl[t, s] <= thr * (1 - mm.zhr[t, s]))
+            m.hr_high_lo = Constraint(m.T, m.S, rule=lambda mm, t, s:
+                                      mm.qdh[t, s] >= thr * mm.zhr[t, s])
+            m.hr_high_up = Constraint(m.T, m.S, rule=lambda mm, t, s:
+                                      mm.qdh[t, s] <= mm.Qdiesel * mm.zhr[t, s])
+            m.cost_diesel = Expression(m.T, m.S, rule=lambda mm, t, s:
+                                       curve["c_low"] * mm.qdl[t, s]
+                                       + curve["c_high"] * mm.qdh[t, s])
+        else:
+            m.cost_diesel = Expression(m.T, m.S, rule=lambda mm, t, s:
+                                       mm.cdiesel[t] * mm.qdiesel[t, s])
+
         # =====================================================================
         # Discrete price menu + exact linearization of revenue p[t]*qMGO[t]
         # =====================================================================
-        # exactly one price level per hour
-        m.price_select = Constraint(
-            m.T, rule=lambda mm, t: sum(mm.b[t, k] for k in mm.K) == 1)
-        # p[t] = sum_k pi_k b[t,k]  (its bound [0, Phat] forbids menu levels above the cap)
-        m.price_link = Constraint(
-            m.T, rule=lambda mm, t: mm.p[t] == sum(mm.Pi[k] * mm.b[t, k] for k in mm.K))
+        if informed:
+            # exactly one price level per hour and outcome
+            m.price_select = Constraint(
+                m.T, m.S, rule=lambda mm, t, s: sum(mm.b[t, k, s] for k in mm.K) == 1)
+            m.price_link = Constraint(
+                m.T, m.S, rule=lambda mm, t, s:
+                    mm.p[t, s] == sum(mm.Pi[k] * mm.b[t, k, s] for k in mm.K))
+        else:
+            # exactly one price level per hour
+            m.price_select = Constraint(
+                m.T, rule=lambda mm, t: sum(mm.b[t, k] for k in mm.K) == 1)
+            # p[t] = sum_k pi_k b[t,k]  (its bound [0, Phat] forbids menu levels above the cap)
+            m.price_link = Constraint(
+                m.T, rule=lambda mm, t: mm.p[t] == sum(mm.Pi[k] * mm.b[t, k] for k in mm.K))
 
         # One tariff for the whole day: tie every hour to the first hour's level.
         # Linking the BINARIES rather than p[t] directly is the same restriction
         # (p is a function of b through price_link) but a tighter formulation:
-        # Gurobi fixes all 24 hours the moment hour 0 is branched on.
+        # Gurobi fixes all 24 hours the moment hour 0 is branched on. With an
+        # informed leader the day is flat within each outcome.
         if data.get("flatPrice", False):
             t0 = m.T.first()
-            m.price_flat = Constraint(
-                m.T, m.K,
-                rule=lambda mm, t, k: (Constraint.Skip if t == t0
-                                       else mm.b[t, k] == mm.b[t0, k]))
+            if informed:
+                m.price_flat = Constraint(
+                    m.T, m.K, m.S,
+                    rule=lambda mm, t, k, s: (Constraint.Skip if t == t0
+                                              else mm.b[t, k, s] == mm.b[t0, k, s]))
+            else:
+                m.price_flat = Constraint(
+                    m.T, m.K,
+                    rule=lambda mm, t, k: (Constraint.Skip if t == t0
+                                           else mm.b[t, k] == mm.b[t0, k]))
 
-        # w[t,k,s] = b[t,k] * qMGO[t,s]  (binary * continuous, exact):
+        # w[t,k,s] = b * qMGO[t,s]  (binary * continuous, exact):
         m.w_le_b = Constraint(
-            m.T, m.K, m.S, rule=lambda mm, t, k, s: mm.w[t, k, s] <= (mm.Qdiesel + mm.QPV[t]) * mm.b[t, k])
+            m.T, m.K, m.S, rule=lambda mm, t, k, s:
+                mm.w[t, k, s] <= (mm.Qdiesel + mm.QPV[t]) * _pick(mm, t, k, s))
         m.w_le_q = Constraint(
             m.T, m.K, m.S, rule=lambda mm, t, k, s: mm.w[t, k, s] <= mm.qMGO[t, s])
         m.w_ge = Constraint(
             m.T, m.K, m.S, rule=lambda mm, t, k, s:
-                mm.w[t, k, s] >= mm.qMGO[t, s] - (mm.Qdiesel + mm.QPV[t]) * (1 - mm.b[t, k]))
+                mm.w[t, k, s] >= mm.qMGO[t, s] - (mm.Qdiesel + mm.QPV[t]) * (1 - _pick(mm, t, k, s)))
         # valid equality (implied by the above + price_select): sum_k w[t,k,s] = qMGO[t,s]
         m.w_sum = Constraint(
             m.T, m.S, rule=lambda mm, t, s: sum(mm.w[t, k, s] for k in mm.K) == mm.qMGO[t, s])
@@ -338,7 +444,7 @@ class BilevelMPEC:
         m.demand_balance = Constraint(
             m.T, m.S,
             rule=lambda mm, t, s:
-                mm.D[t] + mm.dd[t]
+                mm.D[t] + mm.dd[_x(t, s)]
                 == mm.qMGO[t, s] + mm.qPG[t, s] + mm.qsupp[t, s] + mm.qcri[t, s])
 
         # Demand response on the uncovered baseline load Rbar_{t,s}, in one of
@@ -363,19 +469,23 @@ class BilevelMPEC:
         # were: the factor multiplying the load is unchanged, only the load it
         # acts on has shrunk.
         def demand_response_rule(mm, t, s):
-            ratio = ((mm.p[t] - mm.P[t]) / mm.P[t] if _deviation
-                     else mm.p[t] / mm.P[t])
+            ratio = ((_price(mm, t, s) - mm.P[t]) / mm.P[t] if _deviation
+                     else _price(mm, t, s) / mm.P[t])
             return mm.qsupp[t, s] == ratio * mm.alpha1 * mm.Rbar[t, s]
 
         m.demand_response = Constraint(m.T, m.S, rule=demand_response_rule)
 
-        m.shift_balance = Constraint(
-            rule=lambda mm: sum(mm.dd[t] for t in mm.T) == 0)
+        if fi:
+            m.shift_balance = Constraint(
+                m.S, rule=lambda mm, s: sum(mm.dd[t, s] for t in mm.T) == 0)
+        else:
+            m.shift_balance = Constraint(
+                rule=lambda mm: sum(mm.dd[t] for t in mm.T) == 0)
 
         # Δd_t = Δd+_t - Δd-_t, the identity the discomfort is written on. Its
         # dual nu_t is what enters stationarity in Δd below.
         m.shift_split = Constraint(
-            m.T, rule=lambda mm, t: mm.dd[t] == mm.ddp[t] - mm.ddm[t])
+            X, rule=lambda mm, *i: mm.dd[_k(i)] == mm.ddp[_k(i)] - mm.ddm[_k(i)])
 
         # =====================================================================
         # Lower-level stationarity
@@ -388,15 +498,23 @@ class BilevelMPEC:
         # Free variable dd -> equality (eq. stat_shift). dd also appears in the
         # splitting identity, whose dual nu enters here; at eps = 0 the two rows
         # below force nu = 0 and this is the equation it always was.
-        m.stat_shift = Constraint(
-            m.T,
-            rule=lambda mm, t:
-                sum(mm.lam[t, s] for s in mm.S) + mm.gp[t] - mm.gm[t] + mm.rho
-                - mm.nu[t] == 0)
+        if fi:
+            # Δd_{t,s} enters scenario s's balance only.
+            m.stat_shift = Constraint(
+                m.TS,
+                rule=lambda mm, t, s:
+                    mm.lam[t, s] + mm.gp[t, s] - mm.gm[t, s] + mm.rho[s]
+                    - mm.nu[t, s] == 0)
+        else:
+            m.stat_shift = Constraint(
+                m.T,
+                rule=lambda mm, t:
+                    sum(mm.lam[t, s] for s in mm.S) + mm.gp[t] - mm.gm[t] + mm.rho
+                    - mm.nu[t] == 0)
 
         # Reduced costs (>= 0 side of the complementarities)
         def rc_mgo(mm, t, s):
-            return mm.prob[s] * mm.p[t] - mm.lam[t, s]
+            return mm.prob[s] * _price(mm, t, s) - mm.lam[t, s]
 
         def rc_pg(mm, t, s):
             return mm.prob[s] * mm.pPG[t] - mm.lam[t, s] + mm.beta[t, s]
@@ -441,36 +559,43 @@ class BilevelMPEC:
         m.pg_cap = Constraint(m.T, m.S, rule=lambda mm, t, s: mm.qPG[t, s] <= mm.QbarPG[t, s])
 
         # 6) gp _|_ (shiftFrac*D - dd)   (shift upper slack)
-        m.cc_gp_a = Constraint(m.T, rule=lambda mm, t: mm.gp[t] <= M["gamma"] * mm.zgp[t])
-        m.cc_gp_b = Constraint(m.T, rule=lambda mm, t:
-                               mm.shiftFrac * mm.D[t] - mm.dd[t] <= M_slackShift[t] * (1 - mm.zgp[t]))
-        m.shift_up = Constraint(m.T, rule=lambda mm, t: mm.dd[t] <= mm.shiftFrac * mm.D[t])
+        m.cc_gp_a = Constraint(X, rule=lambda mm, *i: mm.gp[_k(i)] <= M["gamma"] * mm.zgp[_k(i)])
+        m.cc_gp_b = Constraint(X, rule=lambda mm, *i:
+                               mm.shiftFrac * mm.D[i[0]] - mm.dd[_k(i)]
+                               <= M_slackShift[i[0]] * (1 - mm.zgp[_k(i)]))
+        m.shift_up = Constraint(X, rule=lambda mm, *i: mm.dd[_k(i)] <= mm.shiftFrac * mm.D[i[0]])
 
         # 7) gm _|_ (shiftFrac*D + dd)   (shift lower slack)
-        m.cc_gm_a = Constraint(m.T, rule=lambda mm, t: mm.gm[t] <= M["gamma"] * mm.zgm[t])
-        m.cc_gm_b = Constraint(m.T, rule=lambda mm, t:
-                               mm.shiftFrac * mm.D[t] + mm.dd[t] <= M_slackShift[t] * (1 - mm.zgm[t]))
-        m.shift_lo = Constraint(m.T, rule=lambda mm, t: mm.dd[t] >= -mm.shiftFrac * mm.D[t])
+        m.cc_gm_a = Constraint(X, rule=lambda mm, *i: mm.gm[_k(i)] <= M["gamma"] * mm.zgm[_k(i)])
+        m.cc_gm_b = Constraint(X, rule=lambda mm, *i:
+                               mm.shiftFrac * mm.D[i[0]] + mm.dd[_k(i)]
+                               <= M_slackShift[i[0]] * (1 - mm.zgm[_k(i)]))
+        m.shift_lo = Constraint(X, rule=lambda mm, *i: mm.dd[_k(i)] >= -mm.shiftFrac * mm.D[i[0]])
 
         # 8) / 9) the two halves of the shift against their reduced costs.
         # eps > 0 on both sides is what breaks the tie: with nothing to gain,
         # each half prices itself out and the village leaves its load alone.
-        def rc_ddp(mm, t):
-            return mm.epsShift + mm.nu[t]
+        # An informed village weighs its discomfort by the outcome's
+        # probability, since the discomfort is then an expectation.
+        def _eps(mm, i):
+            return mm.prob[i[1]] * mm.epsShift if fi else mm.epsShift
 
-        def rc_ddm(mm, t):
-            return mm.epsShift - mm.nu[t]
+        def rc_ddp(mm, i):
+            return _eps(mm, i) + mm.nu[_k(i)]
 
-        m.rc_ddp_geq = Constraint(m.T, rule=lambda mm, t: rc_ddp(mm, t) >= 0)
-        m.rc_ddm_geq = Constraint(m.T, rule=lambda mm, t: rc_ddm(mm, t) >= 0)
-        m.cc_ddp_a = Constraint(m.T, rule=lambda mm, t:
-                                mm.ddp[t] <= M_ddhalf[t] * mm.zddp[t])
-        m.cc_ddp_b = Constraint(m.T, rule=lambda mm, t:
-                                rc_ddp(mm, t) <= M_rc_dd * (1 - mm.zddp[t]))
-        m.cc_ddm_a = Constraint(m.T, rule=lambda mm, t:
-                                mm.ddm[t] <= M_ddhalf[t] * mm.zddm[t])
-        m.cc_ddm_b = Constraint(m.T, rule=lambda mm, t:
-                                rc_ddm(mm, t) <= M_rc_dd * (1 - mm.zddm[t]))
+        def rc_ddm(mm, i):
+            return _eps(mm, i) - mm.nu[_k(i)]
+
+        m.rc_ddp_geq = Constraint(X, rule=lambda mm, *i: rc_ddp(mm, i) >= 0)
+        m.rc_ddm_geq = Constraint(X, rule=lambda mm, *i: rc_ddm(mm, i) >= 0)
+        m.cc_ddp_a = Constraint(X, rule=lambda mm, *i:
+                                mm.ddp[_k(i)] <= M_ddhalf[i[0]] * mm.zddp[_k(i)])
+        m.cc_ddp_b = Constraint(X, rule=lambda mm, *i:
+                                rc_ddp(mm, i) <= M_rc_dd * (1 - mm.zddp[_k(i)]))
+        m.cc_ddm_a = Constraint(X, rule=lambda mm, *i:
+                                mm.ddm[_k(i)] <= M_ddhalf[i[0]] * mm.zddm[_k(i)])
+        m.cc_ddm_b = Constraint(X, rule=lambda mm, *i:
+                                rc_ddm(mm, i) <= M_rc_dd * (1 - mm.zddm[_k(i)]))
 
         # =====================================================================
         # Objective: EXPECTED MGO revenue - diesel - PV  (eq. mpec_obj)
@@ -480,7 +605,7 @@ class BilevelMPEC:
             #         = sum_{t,k,s} prob_s * pi_k * w[t,k,s]   (exact, linear)
             revenue = sum(mm.prob[s] * mm.Pi[k] * mm.w[t, k, s]
                           for t in mm.T for k in mm.K for s in mm.S)
-            c_diesel = sum(mm.prob[s] * mm.cdiesel[t] * mm.qdiesel[t, s]
+            c_diesel = sum(mm.prob[s] * mm.cost_diesel[t, s]
                            for t in mm.T for s in mm.S)
             c_pv = sum(mm.prob[s] * mm.cPV[t] * mm.qPV[t, s]
                        for t in mm.T for s in mm.S)

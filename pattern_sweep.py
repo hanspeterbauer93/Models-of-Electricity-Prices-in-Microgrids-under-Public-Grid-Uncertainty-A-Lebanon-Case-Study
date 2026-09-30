@@ -26,25 +26,25 @@ carries the effect of the axis it is drawn against. What load shifting does to
 the leader on its own stays in the reference and out of the span; what is left
 is EDL timing alone.
 
-THE THREE SWEEPS, AND THE FIGURE THEY SHARE
+THE TWO SWEEPS, AND THE FIGURES THEY SHARE
 
     shift_dg    DIESEL-ONLY fleet (config's 400 kW genset, no PV), across load
                 shift 0 / 10 / 20%, at P(pattern) = 1.
     shift_pv    the same three shift levels with 200 kWp of PV added, so the
                 pair isolates what the PV does.
-    belief_pv   P(pattern) = 0 .. 100%, at 10% shift with the 200 kWp fleet.
-    belief_dg   the same belief sweep on the diesel-only fleet.
+
+The sweep over the leader's belief in the pattern lives in
+:mod:`stochastic_sweep`, which reuses :func:`sweep` and :func:`solve_at_belief`
+from here.
 
 They are drawn as range lines in the language of :mod:`stochastic_analysis`: the
 quantity on x, the series on y, each line one sweep collapsed to its two ends
-with a tick at every point between. THREE figures, each with a price panel and a
-profit panel sharing their rows and all three seasons in both: one per pattern
-for the load shift sweeps, where the two fleets sit together because the
-contrast between them is the argument, and one for the availability sweep, which
-keeps its own page since its axis is the leader's BELIEF rather than the
-village's flexibility. The axis is the LEVEL, not the span, so no supply is a
-POINT marked on each line -- that row's own reference -- and the end labels give
-the span from it in percent.
+with a tick at every point between. TWO figures, one per pattern, each with a
+price panel and a profit panel sharing their rows and all three seasons in
+both; the two fleets sit together because the contrast between them is the
+argument. The axis is the LEVEL, not the span, so no supply is a POINT marked
+on each line -- that row's own reference -- and the end labels give the span
+from it in percent.
 
 TWO CHANNELS, OPPOSITE SIGNS
 The first two figures exist because the price responds to timing through two
@@ -97,10 +97,6 @@ Outputs, under :data:`config.OUTPUT_DIR`:
                                 leader's price and its profit, both fleets,
                                 all three seasons
     pattern_offpeak.png         the same for offpeak
-    pattern_availability_pv.png the belief sweep with PV, as an XY figure:
-                                the level against P(pattern), colour by
-                                pattern and shade by season
-    pattern_availability_dg.png the same on the diesel-only fleet
     pattern_sweep.xlsx          every run and every span behind them
 
 Usage:
@@ -116,15 +112,13 @@ from dataclasses import dataclass
 
 import matplotlib
 matplotlib.use("Agg")
-import matplotlib.colors as mcolors
 import matplotlib.pyplot as plt
 from openpyxl import Workbook, load_workbook
 from pyomo.environ import TerminationCondition, value
 
 import config
 from asset_sweep import (AXIS, INK, MUTED, RULE, SEASON_COLOR, SEASON_LABEL,
-                         _end_labels, _layout_issues, _write_rows,
-                         menu_step)
+                         _layout_issues, _write_rows, menu_step)
 from data.input_data import load_data
 from model.bilevel_mpec import BilevelMPEC
 from run import build_instance
@@ -141,27 +135,15 @@ RESIDUAL = "none"                 # what carries 1 - w
 PATTERNS: tuple[str, ...] = ("peak", "offpeak")
 NONE = "no supply"
 
-# The PV added in the second and third figures.                   [ASSUMPTION]
+# The PV added in the shift_pv sweep (and in stochastic_sweep).   [ASSUMPTION]
 # config carries none, and without PV the hours do not differ in cost, so the
 # technology channel above is switched off entirely.
 PV_KWP: float = 200.0
 
-# Load shift levels of the first two figures, as a fraction of hourly demand.
+# Load shift levels of the two figures, as a fraction of hourly demand.
 # 0% is the analytical anchor (no shift lever at all), 10% is config's own
 # standard, 20% a village twice as flexible.                      [ASSUMPTION]
 SHIFTS: tuple[float, ...] = (0.0, 0.10, 0.20)
-
-# Belief weights of the third figure, P(pattern). 0 is the no-supply run itself
-# -- the shared limit both patterns start from -- so it is solved once.
-WEIGHTS: tuple[float, ...] = (0.0, 0.20, 0.40, 0.60, 0.80, 1.00)
-
-# The belief figure's own build: config's standard shift, with the PV.
-BELIEF_SHIFT: float = 0.10
-
-# Okabe-Ito, through the palette validator (adjacent CVD dE >= 11, all >= 3:1 on
-# white).
-COLOR = {"peak": "#D55E00", "offpeak": "#009E73", NONE: "#666666"}
-MARKER = {"peak": "o", "offpeak": "s"}
 
 FIELDS = [
     ("season",       "season"),
@@ -299,8 +281,9 @@ def sweep(seasons: list[str], *, shifts: list[float], weights: list[float],
     Every point of one sweep: both patterns and their reference, per season.
 
     One call is ONE figure. ``shifts`` and ``weights`` are both lists because
-    the two figure kinds differ only in which of them has length > 1: the shift
-    figures fix the belief at P(pattern) = 1, the belief figure fixes the shift.
+    the two sweep kinds differ only in which of them has length > 1: the shift
+    figures here fix the belief at P(pattern) = 1, :mod:`stochastic_sweep`
+    fixes the shift and sweeps the belief.
     ``cache`` is shared across calls, so a point the figures have in common --
     the 10% shift reference of the PV fleet, for instance -- is solved once.
     """
@@ -414,7 +397,7 @@ def report(rows: list[dict], xkey: str, xname: str, step: float) -> None:
 # span is then the distance from that mark to the line's ends, which the end
 # labels give in percent alongside the level.
 #
-# Two figures, one per pattern, each carrying all three sweeps and all three
+# Two figures, one per pattern, each carrying both sweeps and all three
 # seasons in a price panel and a profit panel that share their rows. Read
 # across a row, the price panel's short travel against the profit panel's long
 # one is the module's claim.
@@ -431,10 +414,6 @@ SHIFT_SWEEPS: tuple[Sweep, ...] = (
     Sweep("shift_dg", "shift", "DG only", False),
     Sweep("shift_pv", "shift", "+200 kWp PV", False),
 )
-AVAIL_SWEEPS: tuple[Sweep, ...] = (
-    Sweep("belief_pv", "w", "+200 kWp PV", True),
-    Sweep("belief_dg", "w", "DG only", True),
-)
 
 # The two panels of every figure.
 QUANTITIES = (
@@ -446,19 +425,6 @@ QUANTITIES = (
 )
 
 REF_COLOR = "#333333"
-
-# The availability figure colours by PATTERN and shades by season, since there
-# the pattern is the comparison and the season only repeats it. Summer is the
-# lightest and winter the darkest, which is also the order of their sun.
-SEASON_SHADE = {"summer": 0.38, "fall_spring": 0.0, "winter": -0.32}
-
-
-def _shade(color: str, amount: float):
-    """``color`` blended toward white (amount > 0) or black (amount < 0)."""
-    r, g, b = mcolors.to_rgb(color)
-    if amount >= 0.0:
-        return tuple(c + (1.0 - c) * amount for c in (r, g, b))
-    return tuple(c * (1.0 + amount) for c in (r, g, b))
 
 
 def _references(recs: list[dict]) -> list[dict]:
@@ -672,104 +638,15 @@ def plot_figure(per_figure: dict[str, list[dict]], specs: list[dict], out_path,
     print(f"  wrote {out_path}")
 
 
-def plot_availability(per_figure: dict[str, list[dict]], sw: Sweep, out_path, *,
-                      seasons: list[str], weights: list[float],
-                      fleet: str) -> None:
-    """
-    The belief sweep as an XY figure: the level against P(pattern).
-
-    The other two figures collapse a sweep to a range line, which is right when
-    the sweep has three points and the question is how far it travelled. Belief
-    has six and is the axis of interest in its own right, so it is drawn as a
-    curve: the leader's price on the left, its profit on the right, both
-    absolute, against the probability it puts on the pattern arriving.
-
-    Colour carries the PATTERN, because that is the comparison; the season is a
-    shade of it. Every line starts at P = 0, which is the no-supply run itself,
-    so each line's percentage change from its own left end -- printed at the
-    right end -- is exactly its span against no supply.
-    """
-    order = [s for s in config.SEASONS if s in seasons]
-    specs = [{"season": season, "sweep": sw, "pattern": pattern,
-              "label": f"{pattern} · {SEASON_LABEL.get(season, season)}"}
-             for pattern in PATTERNS for season in order]
-    rows = _rows(per_figure, specs)
-    if not rows:
-        print(f"  nothing to draw — skipped {out_path}")
-        return
-
-    fig, axes = plt.subplots(1, 2, figsize=(14.5, 6.6))
-    for ax, quantity in zip(axes, QUANTITIES):
-        ends = []
-        for row in rows:
-            rng = row["ranges"].get(quantity["key"])
-            if rng is None:
-                continue
-            color = _shade(COLOR[row["pattern"]],
-                           SEASON_SHADE.get(row["season"], 0.0))
-            xs = [100.0 * x for x in rng["xs"]]
-            ax.plot(xs, rng["vs"], color=color, linewidth=2.0,
-                    marker=MARKER[row["pattern"]], markersize=6,
-                    markeredgecolor="white", markeredgewidth=1.0, zorder=3)
-            if rng["ps"][-1] is not None:
-                ends.append((xs[-1], rng["vs"][-1], f"{rng['ps'][-1]:+.1f}%"))
-
-        ax.set_xlabel("$P$(pattern)   —   no supply takes the rest",
-                      fontsize=10, color=INK)
-        ax.set_ylabel(quantity["axis"], fontsize=10, color=INK)
-        ax.set_xticks([100.0 * w for w in sorted(set([0.0] + list(weights)))])
-        ax.xaxis.set_major_formatter(lambda v, _: f"{v:.0f}%")
-        ax.set_xlim(-4.0, 104.0)
-        ax.grid(color=RULE, linewidth=0.7)
-        ax.set_axisbelow(True)
-        ax.tick_params(colors=MUTED, labelsize=9)
-        for side in ("top", "right"):
-            ax.spines[side].set_visible(False)
-        for side in ("left", "bottom"):
-            ax.spines[side].set_color(AXIS)
-        _end_labels(ax, ends)                 # the % change, spread apart
-        ax.margins(x=0.14)
-
-    handles = [plt.Line2D([], [], color=_shade(COLOR[p], SEASON_SHADE.get(s, 0)),
-                          linewidth=2.0, marker=MARKER[p], markersize=6,
-                          markeredgecolor="white",
-                          label=f"{p} · {SEASON_LABEL.get(s, s)}")
-               for p in PATTERNS for s in order]
-
-    fig_w = fig.get_size_inches()[0]
-    ttl = fig.suptitle(
-        textwrap.fill(
-            f"How far the leader trusts the pattern: price and profit against "
-            f"P(pattern), on {fleet} at {100 * BELIEF_SHIFT:.0f}% load shift.  "
-            f"P = 0 is the no-supply run, so the figure at each line's right "
-            f"end is its change from there", width=int(8.2 * fig_w)),
-        x=0.01, y=0.985, ha="left", va="top", fontsize=12.5, color=INK,
-        fontweight="bold")
-    ttl_lines = ttl.get_text().count("\n")
-    leg = fig.legend(handles=handles, loc="upper center",
-                     bbox_to_anchor=(0.5, 0.955 - 0.042 * (ttl_lines + 1)),
-                     ncol=len(handles) // 2, frameon=False, fontsize=8.5)
-    fig.tight_layout(rect=(0, 0.01, 1, 0.93 - 0.042 * (ttl_lines + 1)))
-    for msg in _layout_issues(fig, [ttl, leg]):
-        print(f"  layout: {msg}  [{out_path}]")
-    fig.savefig(out_path, dpi=150, facecolor="white")
-    plt.close(fig)
-    print(f"  wrote {out_path}")
-
-
 def plot_all(per_figure: dict[str, list[dict]], out_dir,
-             seasons: list[str], shifts: list[float],
-             weights: list[float]) -> None:
+             seasons: list[str], shifts: list[float]) -> None:
     """
-    Three figures: the load shift sweeps once per pattern, as range lines, then
-    the availability sweep on its own, as a curve.
+    Two figures: the load shift sweeps once per pattern, as range lines.
 
     A pattern's shift figure puts the two fleets in one panel, because the
     contrast between them IS the argument -- one fleet has a cost channel and
-    the other cannot. The availability sweep keeps its own figure and its own
-    form: its axis is the leader's BELIEF rather than the village's flexibility,
-    and with six points it is a curve worth seeing rather than a distance worth
-    measuring.
+    the other cannot. The belief sweep has its own module,
+    :mod:`stochastic_sweep`.
     """
     order = [s for s in config.SEASONS if s in seasons]
     shift_txt = (f"{' / '.join(f'{100 * s:.0f}' for s in shifts)}% load shift, "
@@ -785,14 +662,6 @@ def plot_all(per_figure: dict[str, list[dict]], out_dir,
             order=order, levels=levels,
             title=f"EDL on the {where}-demand hours ({pattern}): what it does "
                   f"to the leader, across {shift_txt}")
-
-    for sw in AVAIL_SWEEPS:
-        fleet = (_fleet_label(400.0, PV_KWP) if sw.key.endswith("_pv")
-                 else _fleet_label(400.0, 0.0))
-        plot_availability(
-            per_figure, sw,
-            out_dir / f"pattern_availability_{sw.key.split('_')[-1]}.png",
-            seasons=seasons, weights=weights, fleet=fleet)
 
 
 
@@ -839,19 +708,16 @@ def save_analysis(per_figure: dict[str, list[dict]], out_path,
     print(f"  wrote {out_path}")
 
 
-FIGURES: tuple[str, ...] = ("shift_dg", "shift_pv", "belief_pv",
-                            "belief_dg")
+FIGURES: tuple[str, ...] = ("shift_dg", "shift_pv")
 
 
 def main(seasons: list[str] | None = None, figures: list[str] | None = None,
-         shifts: list[float] | None = None, weights: list[float] | None = None,
-         pv_kwp: float = PV_KWP,
+         shifts: list[float] | None = None, pv_kwp: float = PV_KWP,
          dg_kw: float = DG_KW, levels: int | None = None,
          time_limit: float = TIME_LIMIT_S, replot: bool = False) -> None:
     seasons = seasons or list(config.SEASONS.keys())
     figures = figures or list(FIGURES)
     shifts = sorted(shifts or SHIFTS)
-    weights = sorted(w for w in (weights or WEIGHTS) if w > _TOL)
     out_dir = config.OUTPUT_DIR
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -867,12 +733,10 @@ def main(seasons: list[str] | None = None, figures: list[str] | None = None,
         per_figure = load_rows(book)
         print(f"replot from {book}: "
               + ", ".join(f"{k} {len(v)} runs" for k, v in per_figure.items()))
-        plot_all(per_figure, out_dir, seasons, shifts, weights)
+        plot_all(per_figure, out_dir, seasons, shifts)
         return
 
-    n = len(seasons) * (
-        sum(len(shifts) * (1 + 2) for f in figures if f.startswith("shift"))
-        + sum(len(weights) * 2 + 1 for f in figures if f.startswith("belief")))
+    n = len(seasons) * len(figures) * len(shifts) * (1 + 2)
     print(f"up to {n} solves: {len(seasons)} season(s), figures "
           f"{' '.join(figures)}; shared points are solved once")
 
@@ -896,21 +760,8 @@ def main(seasons: list[str] | None = None, figures: list[str] | None = None,
             per_figure["shift_pv"] = rows
             report(rows, "shift", "shift", step)
 
-    for sw in AVAIL_SWEEPS:
-        if sw.key not in figures:
-            continue
-        pv = pv_kwp if sw.key.endswith("_pv") else 0.0
-        print(f"\n=== belief sweep, {_fleet_label(dg_kw, pv)}, load shift "
-              f"{100 * BELIEF_SHIFT:.0f}%")
-        rows = sweep(seasons, shifts=[BELIEF_SHIFT], weights=weights,
-                     dg_kw=dg_kw, pv_kwp=pv, opts=opts, levels=levels,
-                     step=step, cache=cache)
-        if rows:
-            per_figure[sw.key] = rows
-            report(rows, "w", "P", step)
-
-    # One figure per pattern, then the availability sweep.
-    plot_all(per_figure, out_dir, seasons, shifts, weights)
+    # One figure per pattern.
+    plot_all(per_figure, out_dir, seasons, shifts)
 
 
     if per_figure:
@@ -923,26 +774,20 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         description="Price and profit span of the two synthetic EDL timing "
                     "patterns (peak, offpeak) against no supply: across load "
-                    "shift on a diesel-only and on a PV fleet, and across the "
-                    "leader's belief in the pattern.")
+                    "shift on a diesel-only and on a PV fleet.")
     parser.add_argument("--seasons", nargs="+",
                         default=list(config.SEASONS.keys()),
                         choices=list(config.SEASONS.keys()))
     parser.add_argument("--figures", nargs="+", default=list(FIGURES),
                         choices=list(FIGURES),
-                        help=f"Figures to draw (default: all three).")
+                        help=f"Figures to draw (default: both).")
     parser.add_argument("--shifts", nargs="+", type=float, default=None,
                         metavar="F",
                         help=f"Load shift levels of the two shift figures "
                              f"(default {' '.join(f'{s:g}' for s in SHIFTS)}).")
-    parser.add_argument("--weights", nargs="+", type=float, default=None,
-                        metavar="W",
-                        help=f"Belief weights P(pattern) of the belief figure, "
-                             f"in (0, 1] (default "
-                             f"{' '.join(f'{w:g}' for w in WEIGHTS if w > 0)}).")
     parser.add_argument("--pv", type=float, default=PV_KWP, metavar="KWP",
-                        help=f"PV of the second and third figures (default "
-                             f"{PV_KWP:g}). The first is always diesel only.")
+                        help=f"PV of the shift_pv figure (default "
+                             f"{PV_KWP:g}). shift_dg is always diesel only.")
     parser.add_argument("--dg", type=float, default=DG_KW, metavar="KW",
                         help=f"Diesel capacity (default {DG_KW:g}).")
     parser.add_argument("--levels", type=int, default=None,
@@ -953,11 +798,9 @@ if __name__ == "__main__":
                         help="Redraw the figures from the existing workbook "
                              "without solving anything.")
     args = parser.parse_args()
-    if args.weights and not all(0.0 <= w <= 1.0 for w in args.weights):
-        parser.error("--weights must lie in [0, 1]: w is a probability.")
     if args.shifts and not all(0.0 <= s <= 1.0 for s in args.shifts):
         parser.error("--shifts must lie in [0, 1]: it is a fraction of D_t.")
     if args.pv < 0.0 or args.dg <= 0.0:
         parser.error("--pv must be >= 0 and --dg positive.")
-    main(args.seasons, args.figures, args.shifts, args.weights,
-         args.pv, args.dg, args.levels, args.time_limit, args.replot)
+    main(args.seasons, args.figures, args.shifts, args.pv, args.dg,
+         args.levels, args.time_limit, args.replot)
